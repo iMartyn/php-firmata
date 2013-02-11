@@ -1,0 +1,3 @@
+[submodule "php-serial"]
+	path = php-serial
+	url = https://github.com/rubberneck/php-serial.git
