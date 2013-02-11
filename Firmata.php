@@ -23,6 +23,7 @@ class Firmata
      */
     const CMD_PINMODE = 0xF4;
 
+    private $pinModes = array();
     /**
      * Generates a message ready to be sent by sendRawCommand();
      * @param $cmd  int   The command as defined by the class
@@ -82,8 +83,28 @@ class Firmata
     function pinMode($pin,$mode) {
         $message = $this->generateMessage(Firmata::CMD_PINMODE,array("pin"=>$pin,"mode"=>$mode));
         if (array_key_exists('command',$message) && !empty($message["command"])) {
-            return $this->sendRawCommand($message);
+            if ($this->sendRawCommand($message)) {
+                $pinModes[$pin] = $mode;
+                return true;
+            } else {
+                return false;
+            }
         }
         throw new LogicException("Firmata::generateMessage failed, perhaps invalid arguments?");
+    }
+
+    /**
+     * Reads from a pin, but checks that pin is already set up to read mode.
+     * @param $pin
+     * @return bool
+     * @throws LogicException
+     */
+    function digitalRead($pin) {
+        if (!in_array($pin, $this->pinModes) || $this->pinModes[$pin] !== Firmata::PINMODE_INPUT) {
+            throw new LogicException("You cannot read from a pin until such time as it is set to input mode.");
+        } else {
+            /* TODO: Actual reading code here */
+            return true;
+        }
     }
 }
