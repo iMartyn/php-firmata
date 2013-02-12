@@ -127,14 +127,37 @@ class Firmata
                 }
                 switch ($data) {
                     case Firmata::PINMODE_INPUT :
-                        $messagePacket = array(
-                            "command" => 0xF4,
-                            "channel" => $data["pin"],
-                            "byte1" => $data["mode"],
-                            "byte2" => NULL
-                        );
+                        $messagePacket = array(0xF4, $data["pin"], $data["mode"]);
                         return $messagePacket;
                 }
+                break;
+            case Firmata::CMD_DIGITAL_SET :
+                $validation = (array_key_exists("pin", $data) && !empty($data["pin"]) && is_numeric($data["pin"]) &&
+                    array_key_exists("value", $data) && !empty($data["value"]) && is_numeric($data["value"])
+                );
+                if (!$validation) {
+                    throw new LogicException("Every DIGITAL WRITE command must have a numeric pin and value!");
+                }
+                $validation = array_key_exists($data["pin"], $this->pinModes) &&
+                    $this->pinModes[$data["pin"]] == Firmata::PINMODE_OUTPUT;
+                if (!$validation) {
+                    throw new LogicException("PIN " . $data["pin"] . " is not set to output");
+                }
+                return array(0x90 | $data["pin"], $data['value'] & 0x7F, ($data['value'] >> 7) & 0x7F);
+                break;
+            case Firmata::CMD_ANALOG_SET :
+                $validation = (array_key_exists("pin", $data) && !empty($data["pin"]) && is_numeric($data["pin"]) &&
+                    array_key_exists("value", $data) && !empty($data["value"]) && is_numeric($data["value"])
+                );
+                if (!$validation) {
+                    throw new LogicException("Every ANALOG WRITE command must have a numeric pin and value!");
+                }
+                $validation = array_key_exists($data["pin"], $this->pinModes) &&
+                    $this->pinModes[$data["pin"]] == Firmata::PINMODE_PWM;
+                if (!$validation) {
+                    throw new LogicException("PIN " . $data["pin"] . " is not set to pwm");
+                }
+                return array(0xC0 | $data["pin"], $data['value'] & 0x7F, ($data['value'] >> 7) & 0x7F);
                 break;
         }
         throw new LogicException("Unknown message requested by an internal function! Oh hell, even I wasn't expecting that!");
@@ -158,6 +181,39 @@ class Firmata
             //Stop the warnings
         }
         return false;
+    }
+
+    /**
+     * Polls the serial port for data and returns an array of bytes for processing - usually 3 bytes but if sysex,
+     * however many are required.
+     * @return array of bytes.
+     * @throws LogicException
+     */
+    function receiveRawCommand()
+    {
+        if (!$this->serialConnected) {
+            throw new LogicException("Firmata::receiveRawCommand NOT CONNECTED!  Please call Firmata::connect() first");
+        }
+        $byteRead = $this->serialConnection->readPort(1);
+        switch ($byteRead) {
+            case 0xF9 : // REPORT_VERSION - 3 bytes including the F9
+                $returnMessage = array(0xF9, $this->serialConnection->readPort(1), $this->serialConnection->readPort(1));
+                return $returnMessage;
+                break;
+            case 0xF0 : // SYSEX_START - multiple bytes, until SYSEX_END (F7)
+                $returnMessage[] = 0xF0;
+                while ($byteRead = $this->serialConnection->readPort(1) && $byteRead != 0xF7) {
+                    $returnMessage[] = $byteRead;
+                }
+                $returnMessage[] = 0xF7;
+                return $returnMessage;
+                break;
+            default:
+                // midi message, assume.  3 bytes
+                $returnMessage = array($byteRead, $this->serialConnection->readPort(1), $this->serialConnection->readPort(1));
+                return $returnMessage;
+                break;
+        }
     }
 
     /**
