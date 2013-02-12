@@ -166,6 +166,7 @@ class Firmata
     /**
      * Uses the php serial class to send a message to the microcontroller
      * @param $data
+     * @throws LogicException
      * @return mixed Either true (message successfully sent); the data if a retun expected or false (something went wrong)
      */
     function sendRawCommand($data)
