@@ -31,7 +31,7 @@ define('__DEBUG__', true);
  *
  */
 
-require_once "php-serial/php_serial.class.php";
+require_once "myserial.php";
 class Firmata
 {
     /*
@@ -81,25 +81,30 @@ class Firmata
     const VALUE_DIGITAL_HIGH = 1;
     const VALUE_DIGITAL_LOW = 0;
 
-    private $serialConnection = null;
+    const PORT_REREADS = 1044480; // the number of short reads we will allow from the port
+
+    public $serialConnection = null;
     private $serialConnected = false;
     private $pinModes = array();
+    private $dataBuffer = null;
+    private $digitalpins = array();
 
     /**
      * @param string $serialPort e.g. COM3 or /dev/ttyUSB0
      * @param string $baudRate e.g. 115200 - default is 57600
      * @throws exception passes any exception from the serial class
      */
-    private function connect($serialPort, $baudRate = "57600")
+    function connect($serialPort, $buffersize=1024, $baudRate = "57600")
     {
         try {
-            $this->serialConnection = new phpSerial\phpSerial();
+            $this->serialConnection = new mySerial();
             $this->serialConnection->deviceSet($serialPort);
             $this->serialConnection->confBaudRate($baudRate);
             $this->serialConnection->deviceOpen();
         } catch (exception $e) {
             throw $e;
         }
+        $this->dataBuffer = array();
         $this->serialConnected = true;
     }
 
@@ -159,6 +164,15 @@ class Firmata
                 }
                 return array(0xC0 | $data["pin"], $data['value'] & 0x7F, ($data['value'] >> 7) & 0x7F);
                 break;
+            case Firmata::CMD_SYSEX_START :
+                return array(0xF0, 0x00, 0x00);
+                break;
+            case Firmata::REPORT_FIRMWARE :
+                return array(0x79, 0x00, 0x00);
+                break;
+            case Firmata::CMD_SYSEX_END :
+                return array(0xF7, 0x00, 0x00);
+                break;
         }
         throw new LogicException("Unknown message requested by an internal function! Oh hell, even I wasn't expecting that!");
     }
@@ -195,23 +209,52 @@ class Firmata
         if (!$this->serialConnected) {
             throw new LogicException("Firmata::receiveRawCommand NOT CONNECTED!  Please call Firmata::connect() first");
         }
-        $byteRead = $this->serialConnection->readPort(1);
-        switch ($byteRead) {
+        $byteRead = chr(0);
+        while ((ord($byteRead) == 0)) {
+            //serious flaw in php serial - non-blocking and returns empty string if nothing to read!
+            $byteRead = $this->serialConnection->readPort(1,$this::PORT_REREADS);
+        }
+        echo "We got a bit of non-null data! (".ord($byteRead).")\n";
+        switch (ord($byteRead)) {
             case 0xF9 : // REPORT_VERSION - 3 bytes including the F9
-                $returnMessage = array(0xF9, $this->serialConnection->readPort(1), $this->serialConnection->readPort(1));
+                $returnMessage = array(ord(0xF9), ord($this->serialConnection->readPort(1,$this->PORT_REREADS)), ord($this->serialConnection->readPort(1,$this::PORT_REREADS)));
                 return $returnMessage;
                 break;
             case 0xF0 : // SYSEX_START - multiple bytes, until SYSEX_END (F7)
-                $returnMessage[] = 0xF0;
-                while ($byteRead = $this->serialConnection->readPort(1) && $byteRead != 0xF7) {
-                    $returnMessage[] = $byteRead;
+                $returnMessage[] = ord(0xF0);
+                while ($byteRead = $this->serialConnection->readPort(1,$this::PORT_REREADS) && $byteRead != 0xF7) {
+                    $returnMessage[] = ord($byteRead);
                 }
-                $returnMessage[] = 0xF7;
+                $returnMessage[] = ord(0xF7);
                 return $returnMessage;
+                break;
+            case 0x90: case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97:
+            case 0x98: case 0x99: case 0x9A: case 0x9B: case 0x9C: case 0x9D: case 0x9E: case 0x9F:
+                // Digital pin message received
+                // Which pin do we start counting from?
+                $startpin = (ord($byteRead)-0x90)*16;
+                // Each 2-byte message gives 16 pins bitmasked, so 0*16 = 0 (first 16 pins),
+                $pinsbinary1 = $this->serialConnection->readPort(1,$this::PORT_REREADS);
+                $binarystring = str_pad(decbin($pinsbinary1),8,'0',STR_PAD_LEFT);
+                echo "Message Data (1) : ".$binarystring."\n";
+                for ($i=1;$i<=8;$i++) {
+                    $this->digitalpins[$startpin+$i] = intval($binarystring[$i-1]);
+                }
+                $pinsbinary2 = $this->serialConnection->readPort(1,$this::PORT_REREADS);
+                $binarystring = str_pad(decbin($pinsbinary2),8,'0',STR_PAD_LEFT);
+                echo "Message Data (2) : ".$binarystring."\n";
+                for ($i=1;$i<=8;$i++) {
+                    $this->digitalpins[$startpin+8+$i] = intval($binarystring[$i-1]);
+                }
+                //for ($i=1;$i<<1;$i<=0xff) {
+                //    $this->digitalpins[$startpin+$i+0xff] = $pinsbinary2 | $i;
+                //}
+                echo "Digital data : ";
+                echo implode("", $this->digitalpins)."\n";
                 break;
             default:
                 // midi message, assume.  3 bytes
-                $returnMessage = array($byteRead, $this->serialConnection->readPort(1), $this->serialConnection->readPort(1));
+                $returnMessage = array(ord($byteRead), ord($this->serialConnection->readPort(1,$this::PORT_REREADS)), ord($this->serialConnection->readPort(1,$this::PORT_REREADS)));
                 return $returnMessage;
                 break;
         }
@@ -246,6 +289,19 @@ class Firmata
             $this->reset();
             throw new LogicException("Firmata::getVersion Error sending sysex_end! Reset command sent, hope that helps.");
         }
+        $firmwareData = array();
+/*        while (($data = $this->receiveRawCommand()) !== Firmata::CMD_SYSEX_START) {
+            echo "Recieved Sysex_Start";
+            while (($data = $this->receiveRawCommand()) !== Firmata::CMD_SYSEX_END) {
+                if ($data != '') {
+                    echo "Recieved data that wasn't sysex_end\n";
+                    var_dump($data);
+                    sleep(4);
+                    $firmwareData[] = $data;
+                }
+            }
+        }*/
+        var_dump($firmwareData);
     }
 
     /**
@@ -328,4 +384,5 @@ class Firmata
             return true;
         }
     }
+
 }
